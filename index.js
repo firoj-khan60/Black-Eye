@@ -689,7 +689,14 @@ async function run() {
         }
 
         if (smsText) {
-          await sendSMS(order.phone, smsText);
+          let phone = order.phone?.toString().replace(/\D/g, "") || "";
+          if (phone.startsWith("0")) {
+            phone = "88" + phone;
+          } else if (!phone.startsWith("88")) {
+            phone = "88" + phone;
+          }
+
+          await sendSMS(phone, smsText);
         }
 
         // Adjust stock only if there are cart items
