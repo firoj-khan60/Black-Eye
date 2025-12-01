@@ -16,7 +16,7 @@ const sendSMS = async (phone, message) => {
     const apiKey = process.env.BULKSMS_API_KEY;
     const senderId = process.env.BULKSMS_SENDER_ID;
 
-    const url = `http://bulksmsbd.net/api/smsapi?api_key=${apiKey}&type=text&number=${phone}&senderid=${senderId}&message=${encodeURIComponent(
+    const url = `https://bulksmsbd.net/api/smsapi?api_key=${apiKey}&type=text&number=${phone}&senderid=${senderId}&message=${encodeURIComponent(
       message
     )}`;
 
