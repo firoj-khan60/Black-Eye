@@ -16,17 +16,60 @@ const sendSMS = async (phone, message) => {
     const apiKey = process.env.BULKSMS_API_KEY;
     const senderId = process.env.BULKSMS_SENDER_ID;
 
-    const url = `https://bulksmsbd.net/api/smsapi?api_key=${apiKey}&type=text&number=${phone}&senderid=${senderId}&message=${encodeURIComponent(
+    console.log("API KEY:", apiKey);
+    console.log("SENDER ID:", senderId);
+    console.log("SMS PHONE:", phone);
+    console.log("SMS MESSAGE:", message);
+
+    const url = `http://bulksmsbd.net/api/smsapi?api_key=${apiKey}&type=text&number=${phone}&senderid=${senderId}&message=${encodeURIComponent(
       message
     )}`;
 
+    console.log("Attempting SMS via URL:", url);
     const res = await axios.get(url);
+
+    console.log("BulkSMS API Response Data:", res.data);
+
     return res.data;
   } catch (err) {
-    console.log("SMS Error:", err.message);
+    console.error("SMS Network/System Error:", err.message);
     return null;
   }
 };
+
+// const sendSMS = async (phone, message) => {
+//   try {
+//     // Format phone
+//     phone = phone.toString().replace(/\D/g, "");
+//     if (phone.startsWith("0")) phone = "88" + phone;
+//     if (!phone.startsWith("88")) phone = "88" + phone;
+
+//     const url = "https://smpp.revesms.com/httpapi/send_sms";
+
+//     const payload = {
+//       apikey: process.env.REVE_API_KEY,
+//       secretkey: process.env.REVE_SECRET_KEY,
+//       callerID: process.env.REVE_SENDER_ID,
+//       toUser: phone,
+//       messageContent: message,
+//     };
+
+//     console.log("📨 Sending SMS via ReveSMS:", payload);
+
+//     const res = await axios.post(url, payload, {
+//       headers: {
+//         "Content-Type": "application/json",
+//       },
+//     });
+
+//     console.log("✅ ReveSMS Response:", res.data);
+
+//     return res.data;
+//   } catch (err) {
+//     console.error("❌ ReveSMS Error:", err.response?.data || err.message);
+//     return null;
+//   }
+// };
 
 app.use(cors());
 app.use(express.json());
@@ -76,6 +119,7 @@ async function run() {
     const policiesCollection = database.collection("policies");
     const landingPagesCollection = database.collection("landing_pages");
     const shippingCollection = database.collection("shipping");
+    const incompleteOrdersCollection = database.collection("incomplete_orders");
 
     // POST endpoint to save user data (with role)
     app.post("/users", async (req, res) => {
@@ -106,11 +150,17 @@ async function run() {
       res.send({ role: user.role });
     });
 
-    // PATCH endpoint to make a user an admin by ID
-    app.patch("/users/admin/:id", async (req, res) => {
+    // PATCH endpoint to update user role dynamically
+    app.patch("/users/role/:id", async (req, res) => {
       const id = req.params.id;
+      const { role } = req.body; // receive new role from frontend
+
+      if (!role) {
+        return res.status(400).send({ message: "Role is required" });
+      }
+
       const query = { _id: new ObjectId(id) };
-      const updateDoc = { $set: { role: "admin" } };
+      const updateDoc = { $set: { role } };
       const result = await usersCollection.updateOne(query, updateDoc);
       res.send(result);
     });
@@ -398,6 +448,7 @@ async function run() {
             images: updatedProduct.images,
             email: updatedProduct.email,
             barcode: updatedProduct.barcode,
+            freeShipping: updatedProduct.freeShipping || false,
           },
         };
 
@@ -467,7 +518,7 @@ async function run() {
         const result = await reviewsCollection.insertOne(review);
 
         if (result.acknowledged) {
-          review._id = result.insertedId; // add id to the review object
+          review._id = result.insertedId; 
           res.send({ acknowledged: true, review });
         } else {
           res
@@ -531,7 +582,7 @@ async function run() {
 
     app.patch("/cart/:id", async (req, res) => {
       const id = req.params.id;
-      const { quantity, selected } = req.body; // optionally selected
+      const { quantity, selected } = req.body;
       const updateDoc = {};
       if (quantity !== undefined) updateDoc.quantity = quantity;
       if (selected !== undefined) updateDoc.selected = selected;
@@ -620,12 +671,11 @@ async function run() {
     // Get orders for a specific user
     app.get("/orders", async (req, res) => {
       try {
-        const email = req.query.email;
+        const { email, status } = req.query;
         let query = {};
 
-        if (email) {
-          query.email = email;
-        }
+        if (email) query.email = email;
+        if (status) query.status = status;
 
         const orders = await ordersCollection
           .find(query)
@@ -639,6 +689,21 @@ async function run() {
       }
     });
 
+    // Get a specific order by ID
+    app.get("/orders/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const order = await ordersCollection.findOne({ _id: new ObjectId(id) });
+        if (!order) {
+          return res.status(404).send({ message: "Order not found" });
+        }
+        res.send(order);
+      } catch (error) {
+        console.error("Failed to fetch order:", error);
+        res.status(500).send({ message: "Internal Server Error" });
+      }
+    });
+
     // Delete an order
     app.delete("/orders/:id", async (req, res) => {
       const id = req.params.id;
@@ -648,8 +713,48 @@ async function run() {
       res.send(result);
     });
 
+    app.post("/incomplete-orders", async (req, res) => {
+      const data = req.body;
+
+      data.status = "incomplete";
+      data.updatedAt = new Date();
+
+      const result = await incompleteOrdersCollection.updateOne(
+        { sessionId: data.sessionId },
+        { $set: data },
+        { upsert: true }
+      );
+
+      res.send({ success: true });
+    });
+
+    app.get("/incomplete-orders", async (req, res) => {
+      const data = await incompleteOrdersCollection
+        .find()
+        .sort({ updatedAt: -1 })
+        .toArray();
+      res.send(data);
+    });
+
+    // DELETE incomplete order by sessionId
+    app.delete("/incomplete-orders/:sessionId", async (req, res) => {
+      const sessionId = req.params.sessionId;
+
+      const result = await incompleteOrdersCollection.deleteOne({ sessionId });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).send({
+          success: false,
+          message: "No incomplete order found for this session",
+        });
+      }
+
+      res.send({ success: true, message: "Incomplete order removed" });
+    });
+
     // Update order status & adjust stock
     app.patch("/orders/:id/status", async (req, res) => {
+      console.log("🚀 ORDER STATUS API HIT");
       try {
         const { status } = req.body;
         const id = req.params.id;
@@ -689,7 +794,10 @@ async function run() {
         }
 
         if (smsText) {
+          console.log("📨 SMS READY TO SEND:", smsText);
           let phone = order.phone?.toString().replace(/\D/g, "") || "";
+          console.log("📞 RAW PHONE:", order.phone);
+          console.log("📞 FORMATTED PHONE:", phone);
           if (phone.startsWith("0")) {
             phone = "88" + phone;
           } else if (!phone.startsWith("88")) {
@@ -1075,7 +1183,7 @@ async function run() {
 
           // Customer info
           cus_name: fullName,
-          cus_email: email,
+          cus_email: email && email.includes("@") ? email : "noemail@dummy.com",
           cus_add1: address,
           cus_add2: address,
           cus_city: "Dhaka",
@@ -1117,7 +1225,7 @@ async function run() {
     app.post("/sslcommerz/success", async (req, res) => {
       try {
         const paymentData = req.body || req.query || {};
-        console.log("Payment Success:", paymentData);
+        // console.log("Payment Success:", paymentData);
 
         const { tran_id, status, amount } = paymentData;
 
