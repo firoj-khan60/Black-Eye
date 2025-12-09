@@ -617,7 +617,7 @@ async function run() {
         try {
           const fullName = order.fullName || "Customer";
 
-          const smsText = `Hello ${fullName}, your order has been received!\nOrder ID: ${result.insertedId}. We will start processing soon.`;
+          const smsText = `Hello ${fullName}, your order has been received!\nOrder ID: ${result.insertedId}. We will start processing soon. Thank you for shopping with us.`;
 
           let phone = order.phone?.toString().replace(/\D/g, "") || "";
 
@@ -786,16 +786,16 @@ async function run() {
           smsText = `Hi ${order.fullName}, great news! Your order (ID: ${order._id}) is now being processed.`;
         }
         if (status === "shipped") {
-          smsText = `Your order (ID: ${order._id}) has been shipped! Our delivery team will contact you soon.`;
+          smsText = `Hi ${order.fullName}, great news! Your order (ID: ${order._id}) has been shipped! Our delivery team will contact you soon.`;
         }
         if (status === "delivered") {
-          smsText = `Your order (ID: ${order._id}) has been delivered successfully! Thank you for shopping with us ❤️`;
+          smsText = `Hi ${order.fullName}, great news! Your order (ID: ${order._id}) has been delivered successfully! Thank you for shopping with us ❤️`;
         }
         if (status === "cancelled") {
-          smsText = `Your order (ID: ${order._id}) has been cancelled. If this wasn’t you, please contact support.`;
+          smsText = `Hi ${order.fullName}, great news! Your order (ID: ${order._id}) has been cancelled. If this wasn’t you, please contact support.`;
         }
         if (status === "returned") {
-          smsText = `Your order (ID: ${order._id}) has been returned successfully.`;
+          smsText = `Hi ${order.fullName}, great news! Your order (ID: ${order._id}) has been returned successfully.`;
         }
 
         if (smsText) {
@@ -1338,10 +1338,10 @@ async function run() {
         order.status = "paid";
         order.createdAt = new Date();
 
-        // 1. Save order
+        // Save order
         const result = await posOrdersCollection.insertOne(order);
 
-        // 2. Update stock for each product
+        // Update stock
         for (const item of order.cartItems) {
           await productsCollection.updateOne(
             { _id: new ObjectId(item.productId) },
@@ -1349,7 +1349,23 @@ async function run() {
           );
         }
 
-        // 3. Clear POS cart
+        // Send SMS
+        try {
+          const fullName = order.customer?.name || "Customer";
+          const smsText = `Hello ${fullName}, your POS order has been confirmed!\nOrder ID: ${result.insertedId}. Thank you for shopping with us.`;
+
+          let phone =
+            order.customer?.phone?.toString().replace(/\D/g, "") || "";
+          if (phone.startsWith("0")) phone = "88" + phone;
+          else if (!phone.startsWith("88")) phone = "88" + phone;
+
+          await sendSMS(phone, smsText);
+          // console.log("✅ POS Order SMS sent successfully!");
+        } catch (smsErr) {
+          console.error("❌ POS SMS sending failed:", smsErr.message);
+        }
+
+        // Clear POS cart
         await posCartCollection.deleteMany({});
 
         res.send({ success: true, insertedId: result.insertedId });
@@ -1383,6 +1399,42 @@ async function run() {
       } catch (error) {
         console.error("Error deleting order:", error);
         res.status(500).send({ message: "Failed to delete order" });
+      }
+    });
+
+    // Return POS order
+    app.patch("/pos/orders/:id/return", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const order = await posOrdersCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!order) return res.status(404).send({ message: "Order not found" });
+        if (order.isReturned)
+          return res.status(400).send({ message: "Order already returned" });
+
+        // Update stock: add back each product
+        for (const item of order.cartItems) {
+          await productsCollection.updateOne(
+            { _id: new ObjectId(item.productId) },
+            { $inc: { stock: Number(item.quantity) } }
+          );
+        }
+
+        // Mark order as returned
+        await posOrdersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { isReturned: true, returnedAt: new Date() } }
+        );
+
+        res.send({
+          success: true,
+          message: "Order returned and stock updated",
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to return order" });
       }
     });
 
