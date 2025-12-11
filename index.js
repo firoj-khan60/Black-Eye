@@ -932,14 +932,22 @@ async function run() {
 
       apiEndpoint = `${courier.baseUrl}/aladdin/api/v1/orders`;
 
-      payload = {
-        store_id: courier.storeId,
-        order_id: order._id.toString(),
-        recipient_name: order.fullName,
-        recipient_phone: order.phone,
-        recipient_address: order.address,
-        amount_to_collect: order.total,
-      };
+     payload = {
+  store_id: courier.storeId,
+  merchant_order_id: order._id.toString(), // note the field name
+  recipient_name: order.fullName,
+  recipient_phone: order.phone,
+  recipient_address: order.address,
+  delivery_type: order.deliveryType || 48,  // default if not in order
+  item_type: order.itemType || 2,          // default if not in order
+  special_instruction: order.specialInstruction || "",
+  item_quantity: order.itemQuantity || 1,
+  item_weight: order.itemWeight || "0.5",
+  item_description:
+    order.cartItems?.map((item) => `${item.productName}, price-${item.price}`).join("; ") || "",
+  amount_to_collect: order.total || 0,
+};
+
 
       try {
         const resAPI = await axios.post(apiEndpoint, payload, {
