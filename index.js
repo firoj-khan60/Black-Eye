@@ -109,6 +109,7 @@ async function run() {
     const landingPagesCollection = database.collection("landing_pages");
     const shippingCollection = database.collection("shipping");
     const incompleteOrdersCollection = database.collection("incomplete_orders");
+    const gtmCollection = database.collection("gtm_settings");
 
     // POST endpoint to save user data (with role)
     app.post("/users", async (req, res) => {
@@ -1689,6 +1690,94 @@ async function run() {
       }
     });
 
+    // app.get("/expenses/report", async (req, res) => {
+    //   try {
+    //     const { startDate, endDate } = req.query;
+
+    //     let filter = {};
+    //     if (startDate && endDate) {
+    //       filter.date = {
+    //         $gte: new Date(startDate),
+    //         $lte: new Date(endDate),
+    //       };
+    //     }
+
+    //     const expenses = await expensesCollection.find(filter).toArray();
+    //     const now = new Date();
+
+    //     const total = expenses.reduce(
+    //       (sum, e) => sum + Number(e.price || 0),
+    //       0
+    //     );
+
+    //     // If custom date filter is applied → only return filtered total
+    //     if (startDate && endDate) {
+    //       return res.send({ total });
+    //     }
+
+    //     // Otherwise → full report
+    //     const today = expenses
+    //       .filter((e) => new Date(e.date).toDateString() === now.toDateString())
+    //       .reduce((sum, e) => sum + Number(e.price || 0), 0);
+
+    //     const yesterdayDate = new Date(now);
+    //     yesterdayDate.setDate(now.getDate() - 1);
+    //     const yesterday = expenses
+    //       .filter(
+    //         (e) =>
+    //           new Date(e.date).toDateString() === yesterdayDate.toDateString()
+    //       )
+    //       .reduce((sum, e) => sum + Number(e.price || 0), 0);
+
+    //     const weekStart = new Date(now);
+    //     weekStart.setDate(now.getDate() - 7);
+    //     const thisWeek = expenses
+    //       .filter((e) => new Date(e.date) >= weekStart)
+    //       .reduce((sum, e) => sum + Number(e.price || 0), 0);
+
+    //     const prevWeekStart = new Date(now);
+    //     prevWeekStart.setDate(now.getDate() - 14);
+    //     const prevWeekEnd = new Date(now);
+    //     prevWeekEnd.setDate(now.getDate() - 7);
+    //     const previousWeek = expenses
+    //       .filter(
+    //         (e) =>
+    //           new Date(e.date) >= prevWeekStart &&
+    //           new Date(e.date) < prevWeekEnd
+    //       )
+    //       .reduce((sum, e) => sum + Number(e.price || 0), 0);
+
+    //     const thisMonth = expenses
+    //       .filter(
+    //         (e) =>
+    //           new Date(e.date).getMonth() === now.getMonth() &&
+    //           new Date(e.date).getFullYear() === now.getFullYear()
+    //       )
+    //       .reduce((sum, e) => sum + Number(e.price || 0), 0);
+
+    //     const previousMonth = expenses
+    //       .filter(
+    //         (e) =>
+    //           new Date(e.date).getMonth() === now.getMonth() - 1 &&
+    //           new Date(e.date).getFullYear() === now.getFullYear()
+    //       )
+    //       .reduce((sum, e) => sum + Number(e.price || 0), 0);
+
+    //     res.send({
+    //       total,
+    //       today,
+    //       yesterday,
+    //       thisWeek,
+    //       previousWeek,
+    //       thisMonth,
+    //       previousMonth,
+    //     });
+    //   } catch (error) {
+    //     console.error("Error generating report:", error);
+    //     res.status(500).send({ message: "Failed to generate report" });
+    //   }
+    // });
+
     app.get("/expenses/report", async (req, res) => {
       try {
         const { startDate, endDate } = req.query;
@@ -1701,7 +1790,10 @@ async function run() {
           };
         }
 
-        const expenses = await expensesCollection.find(filter).toArray();
+        const expenses = await expensesCollection
+          .find(filter)
+          .sort({ date: -1 })
+          .toArray();
         const now = new Date();
 
         const total = expenses.reduce(
@@ -1709,12 +1801,14 @@ async function run() {
           0
         );
 
-        // If custom date filter is applied → only return filtered total
         if (startDate && endDate) {
-          return res.send({ total });
+          return res.send({
+            total,
+            allExpenses: expenses,
+          });
         }
 
-        // Otherwise → full report
+        // Otherwise full analytics
         const today = expenses
           .filter((e) => new Date(e.date).toDateString() === now.toDateString())
           .reduce((sum, e) => sum + Number(e.price || 0), 0);
@@ -1770,6 +1864,7 @@ async function run() {
           previousWeek,
           thisMonth,
           previousMonth,
+          allExpenses: expenses,
         });
       } catch (error) {
         console.error("Error generating report:", error);
@@ -2526,6 +2621,40 @@ async function run() {
     app.get("/shipping", async (req, res) => {
       const shipping = await shippingCollection.findOne({});
       res.send(shipping);
+    });
+
+    app.post("/gtm", async (req, res) => {
+      try {
+        const { gtmId, enableGtm } = req.body;
+
+        const filter = {};
+        const updateDoc = {
+          $set: {
+            gtmId,
+            enableGtm,
+          },
+        };
+        const options = { upsert: true };
+
+        const result = await gtmCollection.updateOne(
+          filter,
+          updateDoc,
+          options
+        );
+
+        res.send({
+          success: true,
+          message: "GTM settings updated",
+          result,
+        });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    app.get("/gtm", async (req, res) => {
+      const gtm = await gtmCollection.findOne({});
+      res.send(gtm);
     });
 
     // await client.db("admin").command({ ping: 1 });
