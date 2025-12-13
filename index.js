@@ -872,242 +872,281 @@ async function run() {
     });
 
     // Assign courier & place order to courier API
-   app.patch("/orders/:id/courier", async (req, res) => {
-  try {
-    const { courierName } = req.body;
-    const id = req.params.id;
+    app.patch("/orders/:id/courier", async (req, res) => {
+      try {
+        const {
+          courierName,
+          deliveryType,
+          itemType,
+          itemQuantity,
+          itemWeight,
+        } = req.body;
+        const id = req.params.id;
 
-    // Fetch order
-    const order = await ordersCollection.findOne({ _id: new ObjectId(id) });
-    if (!order)
-      return res.status(404).send({
-        success: false,
-        message: "Order not found",
-      });
+        // console.log("PATCH /orders/:id/courier called", {
+        //   id,
+        //   courierName,
+        //   deliveryType,
+        //   itemType,
+        //   itemQuantity,
+        //   itemWeight,
+        // });
 
-    // Fetch courier credentials
-    const courier = await courierCollection.findOne({
-      courierName,
-      status: "active",
-    });
+        // Fetch order
+        const order = await ordersCollection.findOne({ _id: new ObjectId(id) });
+        if (!order)
+          return res.status(404).send({
+            success: false,
+            message: "Order not found",
+          });
 
-    if (!courier)
-      return res.status(400).send({
-        success: false,
-        message: "Courier not active or not found",
-      });
+        // Fetch courier credentials
+        const courier = await courierCollection.findOne({
+          courierName,
+          status: "active",
+        });
 
-    // Mark as assigning
-    await ordersCollection.updateOne(
-      { _id: new ObjectId(id) },
-      {
-        $set: {
-          courier: courierName,
-          courierStatus: "assigning",
-          courierTrackingId: null,
-        },
-      }
-    );
+        if (!courier)
+          return res.status(400).send({
+            success: false,
+            message: "Courier not active or not found",
+          });
 
-    let apiEndpoint = "";
-    let payload = {};
-    let trackingId = null;
+        // console.log("Order and courier found", { order, courier });
 
-    const getPathaoToken = async () => {
-      const tokenRes = await axios.post(
-        `${courier.baseUrl}/aladdin/api/v1/oauth/token`,
-        {
-          client_id: courier.clientId,
-          client_secret: courier.clientSecret,
-          username: courier.username,
-          password: courier.password,
-          grant_type: "password",
+        // Mark as assigning
+        await ordersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              courier: courierName,
+              deliveryType: Number(deliveryType),
+              itemType: Number(itemType),
+              itemQuantity: Number(itemQuantity),
+              itemWeight: Number(itemWeight),
+              courierStatus: "assigning",
+              courierTrackingId: null,
+            },
+          }
+        );
+        // console.log("Order updated as assigning");
+
+        let apiEndpoint = "";
+        let payload = {};
+        let trackingId = null;
+        let recipientPhone = order.phone;
+
+        if (recipientPhone.startsWith("880")) {
+          recipientPhone = "0" + recipientPhone.slice(3);
+        } else if (!recipientPhone.startsWith("0")) {
+          recipientPhone = "0" + recipientPhone;
         }
-      );
-      return tokenRes.data.access_token;
-    };
 
-    if (courierName === "pathao") {
-      const accessToken = await getPathaoToken();
+        const getPathaoToken = async () => {
+          const tokenRes = await axios.post(
+            `${courier.baseUrl}/aladdin/api/v1/issue-token`,
 
-      apiEndpoint = `${courier.baseUrl}/aladdin/api/v1/orders`;
+            {
+              client_id: courier.clientId,
+              client_secret: courier.clientSecret,
+              username: courier.username,
+              password: courier.password,
+              grant_type: "password",
+            }
+          );
+          // console.log("Token received:", tokenRes.data);
+          return tokenRes.data.access_token;
+        };
 
-     payload = {
-  store_id: courier.storeId,
-  merchant_order_id: order._id.toString(), // note the field name
-  recipient_name: order.fullName,
-  recipient_phone: order.phone,
-  recipient_address: order.address,
-  delivery_type: order.deliveryType || 48,  // default if not in order
-  item_type: order.itemType || 2,          // default if not in order
-  special_instruction: order.specialInstruction || "",
-  item_quantity: order.itemQuantity || 1,
-  item_weight: order.itemWeight || "0.5",
-  item_description:
-    order.cartItems?.map((item) => `${item.productName}, price-${item.price}`).join("; ") || "",
-  amount_to_collect: order.total || 0,
-};
+        if (courierName === "pathao") {
+          const accessToken = await getPathaoToken();
 
+          apiEndpoint = `${courier.baseUrl}/aladdin/api/v1/orders`;
 
-      try {
-        const resAPI = await axios.post(apiEndpoint, payload, {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
-        });
+          payload = {
+            store_id: parseInt(courier.storeId),
+            merchant_order_id: order._id.toString(),
+            recipient_name: order.fullName,
+            recipient_phone: recipientPhone,
+            recipient_address: order.address,
+            delivery_type: parseInt(order.deliveryType || 48),
+            item_type: parseInt(order.itemType || 2),
+            special_instruction: order.specialInstruction || "",
+            item_quantity: parseInt(order.itemQuantity || 1),
+            item_weight: parseFloat(order.itemWeight || 0.5),
+            item_description: Array.isArray(order.cartItems)
+              ? order.cartItems
+                  .map((item) => `${item.productName}, price-${item.price}`)
+                  .join("; ")
+              : "",
+            amount_to_collect: parseInt(order.total || 0),
+          };
 
-        trackingId =
-          resAPI.data?.data?.consignment_id ||
-          resAPI.data?.tracking_id ||
-          null;
+          // console.log("Pathao payload prepared:", payload);
 
-        await ordersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              courierStatus: "placed",
-              courierTrackingId: trackingId,
-            },
+          try {
+            const resAPI = await axios.post(apiEndpoint, payload, {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+              },
+            });
+            // console.log("Pathao API response:", resAPI.data);
+
+            trackingId =
+              resAPI.data?.data?.consignment_id ||
+              resAPI.data?.tracking_id ||
+              null;
+
+            await ordersCollection.updateOne(
+              { _id: new ObjectId(id) },
+              {
+                $set: {
+                  courier: courierName,
+      courierStatus: "placed",
+      courierTrackingId: trackingId,
+      status: "shipped",
+      shippedAt: new Date(),
+                },
+              }
+            );
+            // console.log("Tracking ID:", trackingId);
+
+            return res.send({
+              success: true,
+              message: "Pathao assigned successfully",
+              trackingId,
+            });
+          } catch (err) {
+            console.error("PATHAO ERROR:", err.response?.data || err.message);
+
+            await ordersCollection.updateOne(
+              { _id: new ObjectId(id) },
+              {
+                $set: {
+                  courierStatus: "failed",
+                  courierError: err.response?.data || err.message,
+                },
+              }
+            );
+
+            return res.send({
+              success: false,
+              message: "Pathao API failed",
+            });
           }
-        );
+        }
 
-        return res.send({
-          success: true,
-          message: "Pathao assigned successfully",
-          trackingId,
-        });
-      } catch (err) {
-        console.error("PATHAO ERROR:", err.response?.data || err.message);
+        if (courierName === "steadfast") {
+          apiEndpoint = `${courier.baseUrl}/order/insert`;
 
-        await ordersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              courierStatus: "failed",
-              courierError: err.response?.data || err.message,
-            },
+          payload = {
+            invoice: order._id.toString(),
+            recipient_name: order.fullName,
+            recipient_phone: order.phone,
+            delivery_address: order.address,
+            cod_amount: order.total,
+          };
+
+          try {
+            const resAPI = await axios.post(apiEndpoint, payload, {
+              headers: {
+                apiKey: courier.apiKey,
+              },
+            });
+
+            trackingId = resAPI.data?.consignment_id;
+
+            await ordersCollection.updateOne(
+              { _id: new ObjectId(id) },
+              {
+                $set: {
+                  courierStatus: "placed",
+                  courierTrackingId: trackingId,
+                },
+              }
+            );
+
+            return res.send({
+              success: true,
+              message: "Steadfast Assigned Successfully",
+            });
+          } catch (err) {
+            await ordersCollection.updateOne(
+              { _id: new ObjectId(id) },
+              {
+                $set: {
+                  courierStatus: "failed",
+                  courierError: err.response?.data || err.message,
+                },
+              }
+            );
+
+            return res.send({
+              success: false,
+              message: "Steadfast API failed",
+            });
           }
-        );
+        }
 
-        return res.send({
+        if (courierName === "redx") {
+          apiEndpoint = `${courier.baseUrl}/v1.0.0/orders`;
+
+          payload = {
+            customer_name: order.fullName,
+            customer_phone: order.phone,
+            customer_address: order.address,
+            order_id: order._id.toString(),
+            payable_amount: order.total,
+          };
+
+          try {
+            const resAPI = await axios.post(apiEndpoint, payload, {
+              headers: {
+                "API-KEY": courier.apiKey,
+              },
+            });
+
+            trackingId = resAPI.data?.data?.tracking_code;
+
+            await ordersCollection.updateOne(
+              { _id: new ObjectId(id) },
+              {
+                $set: {
+                  courierStatus: "placed",
+                  courierTrackingId: trackingId,
+                },
+              }
+            );
+
+            return res.send({
+              success: true,
+              message: "REDX Assigned Successfully",
+            });
+          } catch (err) {
+            await ordersCollection.updateOne(
+              { _id: new ObjectId(id) },
+              {
+                $set: {
+                  courierStatus: "failed",
+                  courierError: err.response?.data || err.message,
+                },
+              }
+            );
+
+            return res.send({
+              success: false,
+              message: "REDX API failed",
+            });
+          }
+        }
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({
           success: false,
-          message: "Pathao API failed",
+          message: "Internal Server Error",
         });
       }
-    }
-
-    if (courierName === "steadfast") {
-      apiEndpoint = `${courier.baseUrl}/order/insert`;
-
-      payload = {
-        invoice: order._id.toString(),
-        recipient_name: order.fullName,
-        recipient_phone: order.phone,
-        delivery_address: order.address,
-        cod_amount: order.total,
-      };
-
-      try {
-        const resAPI = await axios.post(apiEndpoint, payload, {
-          headers: {
-            apiKey: courier.apiKey,
-          },
-        });
-
-        trackingId = resAPI.data?.consignment_id;
-
-        await ordersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              courierStatus: "placed",
-              courierTrackingId: trackingId,
-            },
-          }
-        );
-
-        return res.send({
-          success: true,
-          message: "Steadfast Assigned Successfully",
-        });
-      } catch (err) {
-        await ordersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              courierStatus: "failed",
-              courierError: err.response?.data || err.message,
-            },
-          }
-        );
-
-        return res.send({
-          success: false,
-          message: "Steadfast API failed",
-        });
-      }
-    }
-
-    if (courierName === "redx") {
-      apiEndpoint = `${courier.baseUrl}/v1.0.0/orders`;
-
-      payload = {
-        customer_name: order.fullName,
-        customer_phone: order.phone,
-        customer_address: order.address,
-        order_id: order._id.toString(),
-        payable_amount: order.total,
-      };
-
-      try {
-        const resAPI = await axios.post(apiEndpoint, payload, {
-          headers: {
-            "API-KEY": courier.apiKey,
-          },
-        });
-
-        trackingId = resAPI.data?.data?.tracking_code;
-
-        await ordersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              courierStatus: "placed",
-              courierTrackingId: trackingId,
-            },
-          }
-        );
-
-        return res.send({
-          success: true,
-          message: "REDX Assigned Successfully",
-        });
-      } catch (err) {
-        await ordersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              courierStatus: "failed",
-              courierError: err.response?.data || err.message,
-            },
-          }
-        );
-
-        return res.send({
-          success: false,
-          message: "REDX API failed",
-        });
-      }
-    }
-  } catch (error) {
-    console.error(error);
-    res.status(500).send({
-      success: false,
-      message: "Internal Server Error",
     });
-  }
-});
-
 
     // Toggle Courier Status
     app.patch("/courier/:id/status", async (req, res) => {
@@ -1605,89 +1644,100 @@ async function run() {
       }
     });
 
-    app.get("/sales-report", async (req, res) => {
-      try {
-        const deliveredOrders = (
-          await ordersCollection.find({ status: "delivered" }).toArray()
-        ).map((o) => ({
-          ...o,
-          orderType: "Online",
-          cartItems: o.cartItems || [],
-          createdAt: o.createdAt || o.date || new Date(),
-        }));
+  app.get("/sales-report", async (req, res) => {
+  try {
+    // Online orders (delivered only)
+    const deliveredOrders = (
+      await ordersCollection.find({ status: "delivered" }).toArray()
+    ).map((o) => ({
+      ...o,
+      orderType: "Online",
+      cartItems: o.cartItems || [],
+      createdAt: o.createdAt || o.orderDate || o.date,
+    }));
 
-        const posOrders = (await posOrdersCollection.find().toArray()).map(
-          (o) => ({
-            ...o,
-            orderType: "POS",
-            cartItems: o.cartItems || [],
-            createdAt: o.createdAt || o.date || new Date(),
-          })
-        );
+    // POS orders
+    const posOrders = (await posOrdersCollection.find().toArray()).map(
+      (o) => ({
+        ...o,
+        orderType: "POS",
+        cartItems: o.cartItems || [],
+        createdAt: o.createdAt || o.orderDate || o.date,
+      })
+    );
 
-        // Combine all
-        const allOrders = [...deliveredOrders, ...posOrders].map((order) => ({
-          ...order,
-          products: order.cartItems || [],
-          total: order.totalPrice || order.total || 0,
-          orderType: order.orderType,
-        }));
+    // Combine all
+    const allOrders = [...deliveredOrders, ...posOrders];
 
-        const calcTotal = (orders) =>
-          orders.reduce((sum, o) => sum + Number(o.total || 0), 0);
+    // 🔁 SAME filterByDate as Profit–Loss
+    const filterByDate = (orders, period) => {
+      const now = new Date();
 
-        const filterByDate = (orders, period) => {
-          const now = new Date();
-          return orders.filter((order) => {
-            const orderDate = new Date(order.createdAt);
-            if (period === "today") {
-              return orderDate.toDateString() === now.toDateString();
-            } else if (period === "yesterday") {
-              const yest = new Date(now);
-              yest.setDate(now.getDate() - 1);
-              return orderDate.toDateString() === yest.toDateString();
-            } else if (period === "week") {
-              const weekAgo = new Date();
-              weekAgo.setDate(now.getDate() - 7);
-              return orderDate >= weekAgo;
-            } else if (period === "lastWeek") {
-              const prevWeekStart = new Date();
-              prevWeekStart.setDate(now.getDate() - 14);
-              const prevWeekEnd = new Date();
-              prevWeekEnd.setDate(now.getDate() - 7);
-              return orderDate >= prevWeekStart && orderDate < prevWeekEnd;
-            } else if (period === "month") {
-              return (
-                orderDate.getMonth() === now.getMonth() &&
-                orderDate.getFullYear() === now.getFullYear()
-              );
-            } else if (period === "lastMonth") {
-              const month = now.getMonth() - 1;
-              const year = now.getFullYear();
-              return (
-                orderDate.getMonth() === month &&
-                orderDate.getFullYear() === year
-              );
-            }
-            return true;
-          });
-        };
+      return orders.filter((order) => {
+        const orderDate = new Date(order.createdAt);
+        if (isNaN(orderDate)) return false;
 
-        res.send({
-          allTime: calcTotal(allOrders),
-          thisMonth: calcTotal(filterByDate(allOrders, "month")),
-          lastMonth: calcTotal(filterByDate(allOrders, "lastMonth")),
-          thisWeek: calcTotal(filterByDate(allOrders, "week")),
-          lastWeek: calcTotal(filterByDate(allOrders, "lastWeek")),
-          today: calcTotal(filterByDate(allOrders, "today")),
-          yesterday: calcTotal(filterByDate(allOrders, "yesterday")),
-          allOrders,
+        if (period === "today") {
+          return orderDate.toDateString() === now.toDateString();
+        } else if (period === "yesterday") {
+          const yest = new Date(now);
+          yest.setDate(now.getDate() - 1);
+          return orderDate.toDateString() === yest.toDateString();
+        } else if (period === "week") {
+          const weekAgo = new Date();
+          weekAgo.setDate(now.getDate() - 7);
+          return orderDate >= weekAgo;
+        } else if (period === "lastWeek") {
+          const prevWeekStart = new Date();
+          prevWeekStart.setDate(now.getDate() - 14);
+          const prevWeekEnd = new Date();
+          prevWeekEnd.setDate(now.getDate() - 7);
+          return orderDate >= prevWeekStart && orderDate < prevWeekEnd;
+        } else if (period === "month") {
+          return (
+            orderDate.getMonth() === now.getMonth() &&
+            orderDate.getFullYear() === now.getFullYear()
+          );
+        } else if (period === "lastMonth") {
+          const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+          return (
+            orderDate.getMonth() === d.getMonth() &&
+            orderDate.getFullYear() === d.getFullYear()
+          );
+        }
+        return true;
+      });
+    };
+
+    // 🔥 SAME calculation style as Profit–Loss (ONLY sales)
+    const calcSales = (orders) => {
+      let sales = 0;
+
+      orders.forEach((order) => {
+        (order.cartItems || []).forEach((p) => {
+          sales += Number(p.price || 0) * Number(p.quantity || 0);
         });
-      } catch (error) {
-        console.error(error);
-        res.status(500).send({ message: "Failed to generate sales report" });
-      }
+      });
+
+      return sales;
+    };
+
+    res.send({
+      allTime: calcSales(allOrders),
+      thisMonth: calcSales(filterByDate(allOrders, "month")),
+      lastMonth: calcSales(filterByDate(allOrders, "lastMonth")),
+      thisWeek: calcSales(filterByDate(allOrders, "week")),
+      lastWeek: calcSales(filterByDate(allOrders, "lastWeek")),
+      today: calcSales(filterByDate(allOrders, "today")),
+      yesterday: calcSales(filterByDate(allOrders, "yesterday")),
+      allOrders,
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: "Failed to generate sales report" });
+  }
+});
+
 
     // Add Expense Category
     app.post("/expense-categories", async (req, res) => {
