@@ -155,6 +155,25 @@ async function run() {
       res.send(result);
     });
 
+    // Update user profile (name, image, address)
+    app.patch("/users/profile/:email", async (req, res) => {
+      const email = req.params.email;
+      const { name, photoURL, address } = req.body;
+
+      const query = { email };
+      const updateDoc = {
+        $set: {
+          name,
+          photoURL,
+          address,
+          updatedAt: new Date(),
+        },
+      };
+
+      const result = await usersCollection.updateOne(query, updateDoc);
+      res.send(result);
+    });
+
     // DELETE endpoint to remove a user
     app.delete("/users/:id", async (req, res) => {
       const id = req.params.id;
@@ -762,7 +781,7 @@ async function run() {
 
     // Update order status & adjust stock
     app.patch("/orders/:id/status", async (req, res) => {
-      // console.log("🚀 ORDER STATUS API HIT");
+      // console.log(" ORDER STATUS API HIT");
 
       try {
         const { status } = req.body;
@@ -774,6 +793,7 @@ async function run() {
             .status(404)
             .send({ success: false, message: "Order not found" });
         }
+        const prevStatus = order.status;
 
         await ordersCollection.updateOne(
           { _id: new ObjectId(id) },
@@ -880,6 +900,7 @@ async function run() {
           itemType,
           itemQuantity,
           itemWeight,
+          specialInstruction,
         } = req.body;
         const id = req.params.id;
 
@@ -924,6 +945,7 @@ async function run() {
               itemType: Number(itemType),
               itemQuantity: Number(itemQuantity),
               itemWeight: Number(itemWeight),
+              specialInstruction: specialInstruction || "",
               courierStatus: "assigning",
               courierTrackingId: null,
             },
@@ -1002,10 +1024,10 @@ async function run() {
               {
                 $set: {
                   courier: courierName,
-      courierStatus: "placed",
-      courierTrackingId: trackingId,
-      status: "shipped",
-      shippedAt: new Date(),
+                  courierStatus: "placed",
+                  courierTrackingId: trackingId,
+                  status: "shipped",
+                  shippedAt: new Date(),
                 },
               }
             );
@@ -1250,60 +1272,62 @@ async function run() {
 
     app.post("/apply-coupon", async (req, res) => {
       try {
-        const codeRaw = req.body.code;
-        const totalAmount = Number(req.body.totalAmount) || 0;
+        const {
+          code,
+          cartProductIds = [],
+          cartItems = [],
+          productsMap = {},
+        } = req.body;
 
-        if (!codeRaw) {
+        if (!code) {
           return res.status(400).send({ message: "Coupon code is required" });
         }
 
-        // use exactly as stored
-        const code = codeRaw.trim();
-
         const coupon = await couponsCollection.findOne({
-          code,
+          code: code.trim(),
           status: "active",
         });
+
         if (!coupon) {
           return res
             .status(404)
             .send({ message: "Invalid or inactive coupon" });
         }
 
-        const now = new Date();
+        const eligibleProductIds = (coupon.productIds || []).map(String);
 
-        if (coupon.startDate && new Date(coupon.startDate) > now) {
-          return res.status(400).send({ message: "Coupon is not active yet" });
+        const eligibleItems = cartItems.filter((item) =>
+          eligibleProductIds.includes(String(item.productId))
+        );
+
+        if (eligibleItems.length === 0) {
+          return res.status(400).send({
+            message: "This coupon is not applicable to selected products",
+          });
         }
 
-        if (coupon.expiryDate && new Date(coupon.expiryDate) < now) {
-          return res.status(400).send({ message: "Coupon has expired" });
-        }
+        //  eligible subtotal
+        let eligibleSubtotal = 0;
 
-        const minReq = Number(coupon.minOrderAmount) || 0;
-        if (minReq && totalAmount < minReq) {
-          return res
-            .status(400)
-            .send({ message: `Minimum order amount is ${minReq}` });
-        }
+        eligibleItems.forEach((item) => {
+          const product = productsMap[item.productId];
+          eligibleSubtotal += (product?.newPrice || 0) * item.quantity;
+        });
 
         let discount = 0;
         if (coupon.discountType === "percentage") {
-          discount = (totalAmount * Number(coupon.discountValue || 0)) / 100;
-        } else if (coupon.discountType === "fixed") {
+          discount =
+            (eligibleSubtotal * Number(coupon.discountValue || 0)) / 100;
+        } else {
           discount = Number(coupon.discountValue || 0);
         }
 
-        if (discount < 0) discount = 0;
-        if (discount > totalAmount) discount = totalAmount;
-
-        const finalAmount = Math.max(totalAmount - discount, 0);
+        if (discount > eligibleSubtotal) discount = eligibleSubtotal;
 
         return res.send({
           success: true,
           code: coupon.code,
           discount: Math.round(discount),
-          finalAmount,
           message: "Coupon applied successfully",
         });
       } catch (error) {
@@ -1604,140 +1628,290 @@ async function run() {
     // Assign courier to POS order
     app.patch("/pos/orders/:id/courier", async (req, res) => {
       try {
-        const id = req.params.id;
-        const { courierName } = req.body;
+        const {
+          courierName,
+          deliveryType,
+          itemType,
+          itemQuantity,
+          itemWeight,
+          specialInstruction,
+        } = req.body;
 
-        if (!courierName) {
+        const id = req.params.id;
+
+        const order = await posOrdersCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!order) {
+          return res.send({ success: false, message: "POS Order not found" });
+        }
+
+        const courier = await courierCollection.findOne({
+          courierName,
+          status: "active",
+        });
+
+        if (!courier) {
           return res.send({
             success: false,
-            message: "Courier name is required",
+            message: "Courier not active or not found",
           });
         }
 
-        const result = await posOrdersCollection.updateOne(
+        // Save assigning state
+        await posOrdersCollection.updateOne(
           { _id: new ObjectId(id) },
           {
             $set: {
               courier: courierName,
-              courierStatus: "assigned",
-              courierAssignedAt: new Date(),
+              deliveryType: Number(deliveryType),
+              itemType: Number(itemType),
+              itemQuantity: Number(itemQuantity),
+              itemWeight: Number(itemWeight),
+              courierStatus: "assigning",
+              courierTrackingId: null,
             },
           }
         );
 
-        if (result.modifiedCount > 0) {
-          return res.send({
-            success: true,
-            message: "Courier assigned successfully",
-          });
-        } else {
-          return res.send({
-            success: false,
-            message: "Order not found or already updated",
-          });
+        let trackingId = null;
+
+        // Phone normalize
+        let phone = order.customer?.phone?.toString() || "";
+        phone = phone.replace(/\D/g, "");
+        if (phone.startsWith("880")) phone = "0" + phone.slice(3);
+        else if (!phone.startsWith("0")) phone = "0" + phone;
+
+        if (courierName === "pathao") {
+          const tokenRes = await axios.post(
+            `${courier.baseUrl}/aladdin/api/v1/issue-token`,
+            {
+              client_id: courier.clientId,
+              client_secret: courier.clientSecret,
+              username: courier.username,
+              password: courier.password,
+              grant_type: "password",
+            }
+          );
+
+          const accessToken = tokenRes.data.access_token;
+
+          const payload = {
+            store_id: parseInt(courier.storeId),
+            merchant_order_id: order._id.toString(),
+            recipient_name: order.customer?.name,
+            recipient_phone: phone,
+            recipient_address: order.customer?.address,
+            delivery_type: Number(deliveryType || 48),
+            item_type: Number(itemType || 2),
+            item_quantity: Number(itemQuantity || 1),
+            item_weight: Number(itemWeight || 0.5),
+            special_instruction: specialInstruction || "",
+            item_description: order.cartItems
+              ?.map((i) => `${i.productName} x ${i.quantity}`)
+              .join(", "),
+            amount_to_collect: order.total,
+          };
+
+          const resAPI = await axios.post(
+            `${courier.baseUrl}/aladdin/api/v1/orders`,
+            payload,
+            {
+              headers: { Authorization: `Bearer ${accessToken}` },
+            }
+          );
+
+          trackingId =
+            resAPI.data?.data?.consignment_id ||
+            resAPI.data?.tracking_id ||
+            null;
         }
+
+        if (courierName === "steadfast") {
+          const payload = {
+            invoice: order._id.toString(),
+            recipient_name: order.customer?.name,
+            recipient_phone: phone,
+            delivery_address: order.customer?.address,
+            cod_amount: order.total,
+          };
+
+          const resAPI = await axios.post(
+            `${courier.baseUrl}/order/insert`,
+            payload,
+            {
+              headers: { apiKey: courier.apiKey },
+            }
+          );
+
+          trackingId = resAPI.data?.consignment_id;
+        }
+
+        if (courierName === "redx") {
+          const payload = {
+            customer_name: order.customer?.name,
+            customer_phone: phone,
+            customer_address: order.customer?.address,
+            order_id: order._id.toString(),
+            payable_amount: order.total,
+          };
+
+          const resAPI = await axios.post(
+            `${courier.baseUrl}/v1.0.0/orders`,
+            payload,
+            {
+              headers: { "API-KEY": courier.apiKey },
+            }
+          );
+
+          trackingId = resAPI.data?.data?.tracking_code;
+        }
+
+        await posOrdersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              courierStatus: "placed",
+              courierTrackingId: trackingId,
+              status: "shipped",
+              specialInstruction,
+              shippedAt: new Date(),
+            },
+          }
+        );
+
+        try {
+          const customerName = order.customer?.name || "Customer";
+
+          let smsText = `Hi ${customerName}, your order (ID: ${
+            order._id
+          }) has been shipped via ${courierName.toUpperCase()}.`;
+
+          if (trackingId) {
+            smsText += ` Tracking ID: ${trackingId}.`;
+          }
+
+          smsText += ` Thank you for shopping with us ❤️`;
+
+          let smsPhone = order.customer?.phone?.toString() || "";
+          smsPhone = smsPhone.replace(/\D/g, "");
+
+          if (smsPhone.startsWith("0")) smsPhone = "88" + smsPhone;
+          else if (!smsPhone.startsWith("88")) smsPhone = "88" + smsPhone;
+
+          await sendSMS(smsPhone, smsText);
+
+          console.log("✅ POS courier SMS sent");
+        } catch (smsErr) {
+          console.error("❌ POS courier SMS failed:", smsErr.message);
+        }
+
+        res.send({
+          success: true,
+          message: "POS order courier placed successfully",
+          trackingId,
+        });
       } catch (error) {
         console.error(error);
-        res
-          .status(500)
-          .send({ success: false, message: "Failed to assign courier" });
+        res.send({
+          success: false,
+          message: "Courier placement failed",
+        });
       }
     });
 
-  app.get("/sales-report", async (req, res) => {
-  try {
-    // Online orders (delivered only)
-    const deliveredOrders = (
-      await ordersCollection.find({ status: "delivered" }).toArray()
-    ).map((o) => ({
-      ...o,
-      orderType: "Online",
-      cartItems: o.cartItems || [],
-      createdAt: o.createdAt || o.orderDate || o.date,
-    }));
+    app.get("/sales-report", async (req, res) => {
+      try {
+        // Online orders (delivered only)
+        const deliveredOrders = (
+          await ordersCollection.find({ status: "delivered" }).toArray()
+        ).map((o) => ({
+          ...o,
+          orderType: "Online",
+          cartItems: o.cartItems || [],
+          createdAt: o.createdAt || o.orderDate || o.date,
+        }));
 
-    // POS orders
-    const posOrders = (await posOrdersCollection.find().toArray()).map(
-      (o) => ({
-        ...o,
-        orderType: "POS",
-        cartItems: o.cartItems || [],
-        createdAt: o.createdAt || o.orderDate || o.date,
-      })
-    );
+        // POS orders
+        const posOrders = (await posOrdersCollection.find().toArray()).map(
+          (o) => ({
+            ...o,
+            orderType: "POS",
+            cartItems: o.cartItems || [],
+            createdAt: o.createdAt || o.orderDate || o.date,
+          })
+        );
 
-    // Combine all
-    const allOrders = [...deliveredOrders, ...posOrders];
+        // Combine all
+        const allOrders = [...deliveredOrders, ...posOrders];
 
-    // 🔁 SAME filterByDate as Profit–Loss
-    const filterByDate = (orders, period) => {
-      const now = new Date();
+        const filterByDate = (orders, period) => {
+          const now = new Date();
 
-      return orders.filter((order) => {
-        const orderDate = new Date(order.createdAt);
-        if (isNaN(orderDate)) return false;
+          return orders.filter((order) => {
+            const orderDate = new Date(order.createdAt);
+            if (isNaN(orderDate)) return false;
 
-        if (period === "today") {
-          return orderDate.toDateString() === now.toDateString();
-        } else if (period === "yesterday") {
-          const yest = new Date(now);
-          yest.setDate(now.getDate() - 1);
-          return orderDate.toDateString() === yest.toDateString();
-        } else if (period === "week") {
-          const weekAgo = new Date();
-          weekAgo.setDate(now.getDate() - 7);
-          return orderDate >= weekAgo;
-        } else if (period === "lastWeek") {
-          const prevWeekStart = new Date();
-          prevWeekStart.setDate(now.getDate() - 14);
-          const prevWeekEnd = new Date();
-          prevWeekEnd.setDate(now.getDate() - 7);
-          return orderDate >= prevWeekStart && orderDate < prevWeekEnd;
-        } else if (period === "month") {
-          return (
-            orderDate.getMonth() === now.getMonth() &&
-            orderDate.getFullYear() === now.getFullYear()
-          );
-        } else if (period === "lastMonth") {
-          const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-          return (
-            orderDate.getMonth() === d.getMonth() &&
-            orderDate.getFullYear() === d.getFullYear()
-          );
-        }
-        return true;
-      });
-    };
+            if (period === "today") {
+              return orderDate.toDateString() === now.toDateString();
+            } else if (period === "yesterday") {
+              const yest = new Date(now);
+              yest.setDate(now.getDate() - 1);
+              return orderDate.toDateString() === yest.toDateString();
+            } else if (period === "week") {
+              const weekAgo = new Date();
+              weekAgo.setDate(now.getDate() - 7);
+              return orderDate >= weekAgo;
+            } else if (period === "lastWeek") {
+              const prevWeekStart = new Date();
+              prevWeekStart.setDate(now.getDate() - 14);
+              const prevWeekEnd = new Date();
+              prevWeekEnd.setDate(now.getDate() - 7);
+              return orderDate >= prevWeekStart && orderDate < prevWeekEnd;
+            } else if (period === "month") {
+              return (
+                orderDate.getMonth() === now.getMonth() &&
+                orderDate.getFullYear() === now.getFullYear()
+              );
+            } else if (period === "lastMonth") {
+              const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+              return (
+                orderDate.getMonth() === d.getMonth() &&
+                orderDate.getFullYear() === d.getFullYear()
+              );
+            }
+            return true;
+          });
+        };
 
-    // 🔥 SAME calculation style as Profit–Loss (ONLY sales)
-    const calcSales = (orders) => {
-      let sales = 0;
+        const calcSales = (orders) => {
+          let sales = 0;
 
-      orders.forEach((order) => {
-        (order.cartItems || []).forEach((p) => {
-          sales += Number(p.price || 0) * Number(p.quantity || 0);
+          orders.forEach((order) => {
+            (order.cartItems || []).forEach((p) => {
+              sales += Number(p.price || 0) * Number(p.quantity || 0);
+            });
+          });
+
+          return sales;
+        };
+
+        res.send({
+          allTime: calcSales(allOrders),
+          thisMonth: calcSales(filterByDate(allOrders, "month")),
+          lastMonth: calcSales(filterByDate(allOrders, "lastMonth")),
+          thisWeek: calcSales(filterByDate(allOrders, "week")),
+          lastWeek: calcSales(filterByDate(allOrders, "lastWeek")),
+          today: calcSales(filterByDate(allOrders, "today")),
+          yesterday: calcSales(filterByDate(allOrders, "yesterday")),
+          allOrders,
         });
-      });
-
-      return sales;
-    };
-
-    res.send({
-      allTime: calcSales(allOrders),
-      thisMonth: calcSales(filterByDate(allOrders, "month")),
-      lastMonth: calcSales(filterByDate(allOrders, "lastMonth")),
-      thisWeek: calcSales(filterByDate(allOrders, "week")),
-      lastWeek: calcSales(filterByDate(allOrders, "lastWeek")),
-      today: calcSales(filterByDate(allOrders, "today")),
-      yesterday: calcSales(filterByDate(allOrders, "yesterday")),
-      allOrders,
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Failed to generate sales report" });
+      }
     });
-  } catch (error) {
-    console.error(error);
-    res.status(500).send({ message: "Failed to generate sales report" });
-  }
-});
-
 
     // Add Expense Category
     app.post("/expense-categories", async (req, res) => {
