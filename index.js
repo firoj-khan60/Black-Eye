@@ -1206,8 +1206,15 @@ async function run() {
       try {
         const coupon = req.body;
 
-        // Optional: add a createdAt timestamp
         coupon.createdAt = new Date();
+
+        coupon.startDate = coupon.startDate
+          ? new Date(coupon.startDate + "T00:00:00")
+          : null;
+
+        coupon.expiryDate = coupon.expiryDate
+          ? new Date(coupon.expiryDate + "T23:59:59")
+          : null;
 
         const result = await couponsCollection.insertOne(coupon);
         res.send({ acknowledged: true, insertedId: result.insertedId });
@@ -1217,44 +1224,69 @@ async function run() {
       }
     });
 
-    // Get all coupons or filter by status
     app.get("/coupons", async (req, res) => {
-      try {
-        const status = req.query.status;
-        let query = {};
+  try {
 
-        if (status) {
-          query.status = status;
-        }
-
-        const coupons = await couponsCollection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .toArray();
-        res.send(coupons);
-      } catch (error) {
-        console.error("Failed to fetch coupons:", error);
-        res.status(500).send({ message: "Failed to fetch coupons" });
+    await couponsCollection.updateMany(
+      {
+        expiryDate: { $lt: new Date() },
+        status: "active",
+      },
+      {
+        $set: { status: "inactive" },
       }
-    });
+    );
+
+    const status = req.query.status;
+    let query = {};
+
+    if (status) {
+      query.status = status;
+    }
+
+    const coupons = await couponsCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(coupons);
+  } catch (error) {
+    console.error("Failed to fetch coupons:", error);
+    res.status(500).send({ message: "Failed to fetch coupons" });
+  }
+});
+
 
     // Update a coupon
     app.put("/coupons/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-        const updateData = req.body;
+  try {
+    const id = req.params.id;
+    const updateData = req.body;
 
-        const result = await couponsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: updateData }
-        );
+    if (updateData.startDate) {
+      updateData.startDate = new Date(
+        updateData.startDate + "T00:00:00"
+      );
+    }
 
-        res.send(result);
-      } catch (error) {
-        console.error("Failed to update coupon:", error);
-        res.status(500).send({ message: "Failed to update coupon" });
-      }
-    });
+    if (updateData.expiryDate) {
+      updateData.expiryDate = new Date(
+        updateData.expiryDate + "T23:59:59"
+      );
+    }
+
+    const result = await couponsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+
+    res.send(result);
+  } catch (error) {
+    console.error("Failed to update coupon:", error);
+    res.status(500).send({ message: "Failed to update coupon" });
+  }
+});
+
 
     // Delete a coupon by id
     app.delete("/coupons/:id", async (req, res) => {
@@ -1292,6 +1324,19 @@ async function run() {
           return res
             .status(404)
             .send({ message: "Invalid or inactive coupon" });
+        }
+        const now = new Date();
+
+        if (coupon.startDate && new Date(coupon.startDate) > now) {
+          return res.status(400).send({
+            message: "Coupon is not active yet",
+          });
+        }
+
+        if (coupon.expiryDate && new Date(coupon.expiryDate) < now) {
+          return res.status(400).send({
+            message: "Coupon has expired",
+          });
         }
 
         const eligibleProductIds = (coupon.productIds || []).map(String);
