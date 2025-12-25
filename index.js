@@ -155,10 +155,10 @@ async function run() {
       res.send(result);
     });
 
-    // Update user profile (name, image, address)
+    // Update user profile (name, image, address, mobile)
     app.patch("/users/profile/:email", async (req, res) => {
       const email = req.params.email;
-      const { name, photoURL, address } = req.body;
+      const { name, photoURL, address, phone } = req.body;
 
       const query = { email };
       const updateDoc = {
@@ -166,9 +166,16 @@ async function run() {
           name,
           photoURL,
           address,
+          phone,
           updatedAt: new Date(),
         },
       };
+
+      app.get("/users/profile", async (req, res) => {
+        const email = req.query.email;
+        const user = await usersCollection.findOne({ email });
+        res.send(user);
+      });
 
       const result = await usersCollection.updateOne(query, updateDoc);
       res.send(result);
@@ -993,7 +1000,7 @@ async function run() {
             recipient_address: order.address,
             delivery_type: parseInt(order.deliveryType || 48),
             item_type: parseInt(order.itemType || 2),
-            special_instruction: order.specialInstruction || "",
+            special_instruction: specialInstruction || "",
             item_quantity: parseInt(order.itemQuantity || 1),
             item_weight: parseFloat(order.itemWeight || 0.5),
             item_description: Array.isArray(order.cartItems)
@@ -1225,68 +1232,61 @@ async function run() {
     });
 
     app.get("/coupons", async (req, res) => {
-  try {
+      try {
+        await couponsCollection.updateMany(
+          {
+            expiryDate: { $lt: new Date() },
+            status: "active",
+          },
+          {
+            $set: { status: "inactive" },
+          }
+        );
 
-    await couponsCollection.updateMany(
-      {
-        expiryDate: { $lt: new Date() },
-        status: "active",
-      },
-      {
-        $set: { status: "inactive" },
+        const status = req.query.status;
+        let query = {};
+
+        if (status) {
+          query.status = status;
+        }
+
+        const coupons = await couponsCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(coupons);
+      } catch (error) {
+        console.error("Failed to fetch coupons:", error);
+        res.status(500).send({ message: "Failed to fetch coupons" });
       }
-    );
-
-    const status = req.query.status;
-    let query = {};
-
-    if (status) {
-      query.status = status;
-    }
-
-    const coupons = await couponsCollection
-      .find(query)
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    res.send(coupons);
-  } catch (error) {
-    console.error("Failed to fetch coupons:", error);
-    res.status(500).send({ message: "Failed to fetch coupons" });
-  }
-});
-
+    });
 
     // Update a coupon
     app.put("/coupons/:id", async (req, res) => {
-  try {
-    const id = req.params.id;
-    const updateData = req.body;
+      try {
+        const id = req.params.id;
+        const updateData = req.body;
 
-    if (updateData.startDate) {
-      updateData.startDate = new Date(
-        updateData.startDate + "T00:00:00"
-      );
-    }
+        if (updateData.startDate) {
+          updateData.startDate = new Date(updateData.startDate + "T00:00:00");
+        }
 
-    if (updateData.expiryDate) {
-      updateData.expiryDate = new Date(
-        updateData.expiryDate + "T23:59:59"
-      );
-    }
+        if (updateData.expiryDate) {
+          updateData.expiryDate = new Date(updateData.expiryDate + "T23:59:59");
+        }
 
-    const result = await couponsCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: updateData }
-    );
+        const result = await couponsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateData }
+        );
 
-    res.send(result);
-  } catch (error) {
-    console.error("Failed to update coupon:", error);
-    res.status(500).send({ message: "Failed to update coupon" });
-  }
-});
-
+        res.send(result);
+      } catch (error) {
+        console.error("Failed to update coupon:", error);
+        res.status(500).send({ message: "Failed to update coupon" });
+      }
+    });
 
     // Delete a coupon by id
     app.delete("/coupons/:id", async (req, res) => {
