@@ -155,12 +155,18 @@ async function run() {
       res.send(result);
     });
 
-    // Update user profile (name, image, address, mobile)
+    // GET user profile
+    app.get("/users/profile", async (req, res) => {
+      const email = req.query.email;
+      const user = await usersCollection.findOne({ email });
+      res.send(user);
+    });
+
+    // PATCH user profile
     app.patch("/users/profile/:email", async (req, res) => {
       const email = req.params.email;
       const { name, photoURL, address, phone } = req.body;
 
-      const query = { email };
       const updateDoc = {
         $set: {
           name,
@@ -171,13 +177,7 @@ async function run() {
         },
       };
 
-      app.get("/users/profile", async (req, res) => {
-        const email = req.query.email;
-        const user = await usersCollection.findOne({ email });
-        res.send(user);
-      });
-
-      const result = await usersCollection.updateOne(query, updateDoc);
+      const result = await usersCollection.updateOne({ email }, updateDoc);
       res.send(result);
     });
 
@@ -788,7 +788,7 @@ async function run() {
 
     // Update order status & adjust stock
     app.patch("/orders/:id/status", async (req, res) => {
-      // console.log(" ORDER STATUS API HIT");
+      console.log(" ORDER STATUS API HIT");
 
       try {
         const { status } = req.body;
@@ -998,16 +998,19 @@ async function run() {
             recipient_name: order.fullName,
             recipient_phone: recipientPhone,
             recipient_address: order.address,
-            delivery_type: parseInt(order.deliveryType || 48),
-            item_type: parseInt(order.itemType || 2),
+
+            delivery_type: Number(deliveryType),
+            item_type: Number(itemType),
+            item_quantity: Number(itemQuantity),
+            item_weight: Number(itemWeight),
+
             special_instruction: specialInstruction || "",
-            item_quantity: parseInt(order.itemQuantity || 1),
-            item_weight: parseFloat(order.itemWeight || 0.5),
             item_description: Array.isArray(order.cartItems)
               ? order.cartItems
                   .map((item) => `${item.productName}, price-${item.price}`)
                   .join("; ")
               : "",
+
             amount_to_collect: parseInt(order.total || 0),
           };
 
@@ -1592,7 +1595,7 @@ async function run() {
           else if (!phone.startsWith("88")) phone = "88" + phone;
 
           await sendSMS(phone, smsText);
-          // console.log("✅ POS Order SMS sent successfully!");
+          // console.log(" POS Order SMS sent successfully!");
         } catch (smsErr) {
           console.error("❌ POS SMS sending failed:", smsErr.message);
         }
@@ -1618,6 +1621,42 @@ async function run() {
       } catch (error) {
         console.error(error);
         res.status(500).send({ message: "Failed to fetch POS orders" });
+      }
+    });
+
+    // Check returning customer by phone
+    app.get("/pos/customers/check", async (req, res) => {
+      try {
+        const { phone } = req.query;
+        if (!phone) {
+          return res.send({ exists: false });
+        }
+
+        const cleanPhone = phone.toString().replace(/\D/g, "");
+
+        // Last order by phone
+        const lastOrder = await posOrdersCollection.findOne(
+          { "customer.phone": cleanPhone },
+          { sort: { createdAt: -1 } }
+        );
+
+        if (!lastOrder) {
+          return res.send({ exists: false });
+        }
+
+        const totalOrders = await posOrdersCollection.countDocuments({
+          "customer.phone": cleanPhone,
+        });
+
+        res.send({
+          exists: true,
+          customer: lastOrder.customer,
+          totalOrders,
+          lastOrderDate: lastOrder.createdAt,
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ exists: false });
       }
     });
 
